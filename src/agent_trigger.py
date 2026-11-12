@@ -19,6 +19,7 @@ import pandas as pd
 import time
 import requests
 import os
+import env_loader  # carga claves desde .env
 from datetime import datetime, timedelta
 
 try:

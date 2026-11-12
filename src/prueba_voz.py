@@ -1,4 +1,5 @@
 import os
+import env_loader  # carga claves desde .env
 import pyttsx3
 import requests
 

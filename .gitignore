@@ -43,3 +43,8 @@ desktop.ini
 
 # Journals de SQLite
 data/*.db-journal
+
+# Claves y secretos (nunca subir)
+.env
+.env.*
+!.env.example
