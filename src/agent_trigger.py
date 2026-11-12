@@ -23,17 +23,8 @@ import env_loader  # carga claves desde .env
 from datetime import datetime, timedelta
 
 try:
-    import pyttsx3
-    def _hablar(texto):
-        try:
-            motor = pyttsx3.init()
-            motor.setProperty('rate', 150)
-            motor.setProperty('volume', 1.0)
-            motor.say(texto)
-            motor.runAndWait()
-            motor.stop()
-        except Exception as e:
-            print(f"Error de audio: {e}")
+    # Voz neural (edge-tts) con respaldo local pyttsx3
+    from atom_voz import hablar as _hablar
 except ImportError:
     def _hablar(texto):
         print(f"[TTS no disponible] {texto}")

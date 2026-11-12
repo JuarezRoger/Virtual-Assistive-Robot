@@ -6,13 +6,15 @@ Captura en segundo plano:
   2. Conteo de parpadeos (blinks) por intervalo
   3. Head Pose Estimation (HPE) - pitch, yaw, roll para ergonomia
 
-Usa MediaPipe FaceMesh (468 landmarks) si esta instalado.
+Usa MediaPipe FaceLandmarker (API Tasks, 478 landmarks) si esta instalado.
 Si MediaPipe o la camara no estan disponibles, entra en MODO DEMO
 y genera datos simulados realistas para demostraciones.
 
 Changelog:
   - 2026-04-07: Migracion a MediaPipe, HPE, blinks, alertas de postura
   - 2026-04-07: v2.1 - Modo demo automatico si MediaPipe no esta instalado
+  - 2026-11-12: v3.0 - Migracion a API Tasks (mp.solutions fue eliminada),
+                deteccion automatica de camara, columna source real/demo
 """
 
 import numpy as np
@@ -20,6 +22,7 @@ import sqlite3
 import time
 import math
 import random
+from collections import deque
 from datetime import datetime
 
 # ── Importaciones opcionales ───────────────────────────────────────────
@@ -29,17 +32,50 @@ try:
 except Exception:
     CV2_AVAILABLE = False
 
+from pathlib import Path
+
+# Modelo oficial de MediaPipe FaceLandmarker (API Tasks).
+# La API legacy mp.solutions.face_mesh fue eliminada en MediaPipe >= 0.10.30.
+MODEL_PATH = Path(__file__).resolve().parent.parent / "models" / "face_landmarker.task"
+MODEL_URL = ("https://storage.googleapis.com/mediapipe-models/face_landmarker/"
+             "face_landmarker/float16/1/face_landmarker.task")
+
 try:
     import mediapipe as mp
-    # Verificar que la API legacy de solutions este disponible
-    _solutions = mp.solutions
-    _face_mesh_mod = _solutions.face_mesh
-    mp_face_mesh = _face_mesh_mod
+    from mediapipe.tasks import python as mp_tasks
+    from mediapipe.tasks.python import vision as mp_vision
     MEDIAPIPE_AVAILABLE = True
 except Exception as _mp_err:
     MEDIAPIPE_AVAILABLE = False
-    mp_face_mesh = None
     print(f"[ATOM Visual] MediaPipe no disponible ({type(_mp_err).__name__}: {_mp_err}). Modo demo activado.")
+
+
+def _ensure_model():
+    """Descarga el modelo FaceLandmarker si no existe. Retorna True si esta listo."""
+    if MODEL_PATH.exists() and MODEL_PATH.stat().st_size > 1_000_000:
+        return True
+    try:
+        import urllib.request
+        MODEL_PATH.parent.mkdir(parents=True, exist_ok=True)
+        print(f"[ATOM Visual] Descargando modelo FaceLandmarker en {MODEL_PATH} ...")
+        urllib.request.urlretrieve(MODEL_URL, MODEL_PATH)
+        return MODEL_PATH.stat().st_size > 1_000_000
+    except Exception as e:
+        print(f"[ATOM Visual] No se pudo descargar el modelo: {e}")
+        return False
+
+
+def _open_camera(preferred_index):
+    """Abre la camara preferida; si falla, prueba los indices 0-3."""
+    indices = [preferred_index] + [i for i in range(4) if i != preferred_index]
+    for idx in indices:
+        cap = cv2.VideoCapture(idx, cv2.CAP_DSHOW)
+        if cap.isOpened():
+            ok, _ = cap.read()
+            if ok:
+                return cap, idx
+        cap.release()
+    return None, None
 
 # ─── Indices de landmarks MediaPipe FaceMesh ──────────────────────────
 LEFT_EYE  = [362, 385, 387, 263, 373, 380]
@@ -56,7 +92,9 @@ MODEL_POINTS_3D = np.array([
 ], dtype=np.float64)
 
 # ─── Parametros de deteccion ───────────────────────────────────────────
-EAR_BLINK_THRESHOLD   = 0.21
+EAR_BLINK_THRESHOLD   = 0.21   # Solo modo demo y valor inicial
+EAR_BLINK_RATIO       = 0.80   # Parpadeo = EAR < 80% de la mediana personal reciente
+EAR_HISTORY_FRAMES    = 150    # ~5-10 s de historial para la mediana
 EAR_CONSEC_FRAMES     = 2
 SAVE_INTERVAL_SECONDS = 10
 POSTURE_ALERT_PITCH   = 25.0
@@ -96,7 +134,15 @@ def _estimate_head_pose(landmarks_2d, frame_shape):
     _, _, _, _, _, _, euler_angles = cv2.decomposeProjectionMatrix(
         cv2.hconcat([rotation_mat, translation_vec])
     )
-    return float(euler_angles[0]), float(euler_angles[1]), float(euler_angles[2])
+    pitch, yaw, roll = (float(a) for a in euler_angles.flatten()[:3])
+    # El modelo 3D usa Y hacia arriba y la imagen Y hacia abajo, por eso
+    # decomposeProjectionMatrix devuelve el pitch desplazado ~180 grados.
+    # Normalizar a [-90, 90] para que 0 = mirando de frente.
+    if pitch > 90:
+        pitch -= 180
+    elif pitch < -90:
+        pitch += 180
+    return pitch, yaw, roll
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -161,9 +207,12 @@ class VisualSensorPro:
     y modo demo (datos simulados cuando MediaPipe no esta disponible).
     """
 
-    def __init__(self, camera_index=1, db_path="../data/atom_telemetry.db"):
+    def __init__(self, camera_index=0, db_path="../data/atom_telemetry.db",
+                 show_window=True):
         self.db_path = db_path
         self.camera_index = camera_index
+        self.show_window = show_window
+        self.source = "demo"   # 'real' o 'demo': se guarda en cada registro
 
         self._ear_values   = []
         self._pitch_values = []
@@ -171,6 +220,8 @@ class VisualSensorPro:
         self._roll_values  = []
         self._blink_count   = 0
         self._blink_counter = 0
+        self._ear_history   = deque(maxlen=EAR_HISTORY_FRAMES)
+        self.blink_threshold = EAR_BLINK_THRESHOLD
 
         self.last_avg_ear = 0.0
         self.last_blinks  = 0
@@ -197,7 +248,10 @@ class VisualSensorPro:
             'blinks': 'INTEGER DEFAULT 0',
             'pitch':  'REAL DEFAULT 0.0',
             'yaw':    'REAL DEFAULT 0.0',
-            'roll':   'REAL DEFAULT 0.0'
+            'roll':   'REAL DEFAULT 0.0',
+            # Origen del dato: 'real' (camara) o 'demo' (simulado).
+            # NULL = registro anterior a esta columna (casi seguro demo).
+            'source': 'TEXT'
         }
         for col_name, col_type in new_columns.items():
             if col_name not in existing_cols:
@@ -227,13 +281,14 @@ class VisualSensorPro:
             conn = sqlite3.connect(self.db_path)
             local_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             conn.execute(
-                "INSERT INTO visual_telemetry (timestamp, avg_ear, blinks, pitch, yaw, roll)"
-                " VALUES (?, ?, ?, ?, ?, ?)",
-                (local_time, avg_ear, blinks, avg_pitch, avg_yaw, avg_roll)
+                "INSERT INTO visual_telemetry"
+                " (timestamp, avg_ear, blinks, pitch, yaw, roll, source)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (local_time, avg_ear, blinks, avg_pitch, avg_yaw, avg_roll, self.source)
             )
             conn.commit()
             conn.close()
-            print(f"[Visual Log] {local_time} | EAR: {avg_ear:.3f} | "
+            print(f"[Visual Log] {local_time} | {self.source.upper()} | EAR: {avg_ear:.3f} | "
                   f"Blinks: {blinks} | Pitch: {avg_pitch:.1f} | "
                   f"Yaw: {avg_yaw:.1f} | Guardado en DB")
         except Exception as e:
@@ -266,6 +321,7 @@ class VisualSensorPro:
         print("  Presiona Ctrl+C para detener")
         print("=" * 55 + "\n")
 
+        self.source = "demo"
         gen = DemoDataGenerator()
         last_save = time.time()
 
@@ -299,7 +355,7 @@ class VisualSensorPro:
         overlay = frame.copy()
         cv2.rectangle(overlay, (10, 10), (330, 160), (0, 0, 0), -1)
         cv2.addWeighted(overlay, 0.6, frame, 0.4, 0, frame)
-        ear_color   = (0, 255, 0) if ear > EAR_BLINK_THRESHOLD else (0, 0, 255)
+        ear_color   = (0, 255, 0) if ear > self.blink_threshold else (0, 0, 255)
         pitch_color = (0, 0, 255) if abs(pitch) > POSTURE_ALERT_PITCH else (0, 255, 0)
         yaw_color   = (0, 0, 255) if abs(yaw) > POSTURE_ALERT_YAW else (0, 255, 0)
         font = cv2.FONT_HERSHEY_SIMPLEX
@@ -310,55 +366,73 @@ class VisualSensorPro:
         cv2.putText(frame, f"Roll: {roll:.1f} deg",        (20, 135), font, 0.6, (255,255,255), 2)
         cv2.putText(frame, "ATOM HPE v2.1",                (20, 155), font, 0.4, (128,128,128), 1)
 
-    def _run_real(self):
-        """Modo real con camara y MediaPipe."""
-        cap = cv2.VideoCapture(self.camera_index)
+    def _run_real(self, max_seconds=None):
+        """Modo real con camara y MediaPipe FaceLandmarker (API Tasks)."""
         print("=" * 55)
-        print("  ATOM - Sensor Visual v2.1 (MediaPipe + HPE + Blinks)")
+        print("  ATOM - Sensor Visual v3.0 (MediaPipe Tasks + HPE + Blinks)")
         print("=" * 55)
 
-        if not cap.isOpened():
-            print(f"[ATOM Visual] ERROR: No se pudo acceder a la camara {self.camera_index}.")
+        cap, idx = _open_camera(self.camera_index)
+        if cap is None:
+            print("[ATOM Visual] ERROR: No se encontro ninguna camara (indices 0-3).")
             print("[ATOM Visual] Cambiando a MODO DEMO automaticamente...")
-            cap.release()
             self._run_demo()
             return
 
-        print(f"[ATOM Visual] Camara {self.camera_index} conectada.")
+        options = mp_vision.FaceLandmarkerOptions(
+            base_options=mp_tasks.BaseOptions(model_asset_path=str(MODEL_PATH)),
+            running_mode=mp_vision.RunningMode.VIDEO,
+            num_faces=1,
+            min_face_detection_confidence=0.5,
+            min_face_presence_confidence=0.5,
+            min_tracking_confidence=0.5,
+        )
+
+        self.source = "real"
+        self.camera_index = idx
+        print(f"[ATOM Visual] Camara {idx} conectada.")
         print(f"[ATOM Visual] Guardando cada {SAVE_INTERVAL_SECONDS}s. Presiona 'q' para salir.\n")
 
-        last_save_time = time.time()
+        start_time = time.time()
+        last_save_time = start_time
+        self.frames_total = 0
+        self.frames_with_face = 0
 
-        with mp_face_mesh.FaceMesh(
-            max_num_faces=1,
-            refine_landmarks=True,
-            min_detection_confidence=0.5,
-            min_tracking_confidence=0.5
-        ) as face_mesh:
+        with mp_vision.FaceLandmarker.create_from_options(options) as landmarker:
             while True:
+                if max_seconds and time.time() - start_time >= max_seconds:
+                    break
+
                 ret, frame = cap.read()
                 if not ret:
                     continue
 
                 frame = cv2.flip(frame, 1)
                 rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                results = face_mesh.process(rgb_frame)
+                mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
+                timestamp_ms = int((time.time() - start_time) * 1000)
+                results = landmarker.detect_for_video(mp_image, timestamp_ms)
+                self.frames_total += 1
 
                 pitch, yaw, roll, ear = 0.0, 0.0, 0.0, 0.0
 
-                if results.multi_face_landmarks:
-                    face = results.multi_face_landmarks[0]
+                if results.face_landmarks:
+                    self.frames_with_face += 1
+                    face = results.face_landmarks[0]
                     h, w = frame.shape[:2]
-                    landmarks = np.array([
-                        (face.landmark[i].x * w, face.landmark[i].y * h)
-                        for i in range(468)
-                    ])
+                    # Misma numeracion de puntos que FaceMesh (478 con iris)
+                    landmarks = np.array([(p.x * w, p.y * h) for p in face])
                     left_pts  = np.array([landmarks[i] for i in LEFT_EYE])
                     right_pts = np.array([landmarks[i] for i in RIGHT_EYE])
                     ear = (_compute_ear(left_pts) + _compute_ear(right_pts)) / 2.0
                     self._ear_values.append(ear)
 
-                    if ear < EAR_BLINK_THRESHOLD:
+                    # Umbral adaptativo: cada persona tiene un EAR base distinto
+                    self._ear_history.append(ear)
+                    if len(self._ear_history) >= 30:
+                        self.blink_threshold = EAR_BLINK_RATIO * float(np.median(self._ear_history))
+
+                    if ear < self.blink_threshold:
                         self._blink_counter += 1
                     else:
                         if self._blink_counter >= EAR_CONSEC_FRAMES:
@@ -372,19 +446,21 @@ class VisualSensorPro:
                     self._roll_values.append(roll)
                     self._draw_overlay(frame, ear, pitch, yaw, roll)
 
-                cv2.imshow("ATOM Visual Pro", frame)
-
                 if time.time() - last_save_time >= SAVE_INTERVAL_SECONDS:
                     self._save_interval_to_db()
                     last_save_time = time.time()
 
-                if cv2.waitKey(1) & 0xFF == ord('q'):
-                    break
+                if self.show_window:
+                    cv2.imshow("ATOM Visual Pro", frame)
+                    if cv2.waitKey(1) & 0xFF == ord('q'):
+                        break
 
         self._save_interval_to_db()
         cap.release()
-        cv2.destroyAllWindows()
-        print("[ATOM Visual] Sensor detenido.")
+        if self.show_window:
+            cv2.destroyAllWindows()
+        print(f"[ATOM Visual] Sensor detenido. Rostro detectado en "
+              f"{self.frames_with_face}/{self.frames_total} frames.")
 
     # ─────────────────────────────────────────────────────────────
     #  PUNTO DE ENTRADA PRINCIPAL
@@ -397,8 +473,10 @@ class VisualSensorPro:
           - DEMO:  MediaPipe no instalado (datos simulados realistas)
         """
         if not MEDIAPIPE_AVAILABLE:
-            print("[ATOM Visual] MediaPipe no encontrado. Entrando en MODO DEMO.")
-            print("[ATOM Visual] Para activar modo real: pip install mediapipe==0.10.21\n")
+            print("[ATOM Visual] MediaPipe no encontrado. Entrando en MODO DEMO.\n")
+            self._run_demo()
+        elif not _ensure_model():
+            print("[ATOM Visual] Falta el modelo FaceLandmarker. Entrando en MODO DEMO.\n")
             self._run_demo()
         else:
             self._run_real()
@@ -425,5 +503,5 @@ class VisualSensorPro:
 
 
 if __name__ == "__main__":
-    sensor = VisualSensorPro(camera_index=1)
+    sensor = VisualSensorPro(camera_index=0)
     sensor.run()

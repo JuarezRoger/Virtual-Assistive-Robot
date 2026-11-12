@@ -48,3 +48,6 @@ data/*.db-journal
 .env
 .env.*
 !.env.example
+
+# Modelo MediaPipe (se descarga automaticamente)
+models/*.task
