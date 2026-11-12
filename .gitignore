@@ -1,0 +1,45 @@
+# Entorno virtual
+venv/
+.venv/
+env/
+
+# Cache Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+
+# Base de datos (datos locales del usuario)
+data/*.db
+data/*.csv
+
+# Logs de sesion
+src/atom_logs_*.txt
+
+# Archivos irrelevantes
+"Office y windows Activador.txt"
+*.txt
+
+# Modelos ML entrenados (pesados, se regeneran)
+data/fatigue_model.pkl
+data/fatigue_scaler.pkl
+
+# Modelos de dlib (archivos grandes)
+src/shape_predictor_68_face_landmarks.dat
+
+# Archivos de configuracion local
+config/local.yaml
+
+# IDEs
+.vscode/
+.idea/
+*.code-workspace
+
+# Sistema operativo
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Journals de SQLite
+data/*.db-journal
