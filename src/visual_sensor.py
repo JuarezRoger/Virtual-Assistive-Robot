@@ -93,8 +93,13 @@ MODEL_POINTS_3D = np.array([
 
 # ─── Parametros de deteccion ───────────────────────────────────────────
 EAR_BLINK_THRESHOLD   = 0.21   # Solo modo demo y valor inicial
-EAR_BLINK_RATIO       = 0.80   # Parpadeo = EAR < 80% de la mediana personal reciente
-EAR_HISTORY_FRAMES    = 150    # ~5-10 s de historial para la mediana
+EAR_CLOSED_RATIO      = 0.60   # Ojo cerrado: EAR < 60% del EAR habitual...
+BLINK_SCORE_DELTA     = 0.30   # ...y blendshape eyeBlink > habitual + 0.30
+EAR_HISTORY_FRAMES    = 300    # historial de frames abiertos para la mediana
+LOOK_DOWN_SCORE_DELTA = 0.10   # eyeLookDown > habitual + 0.10 = mirando el teclado
+LOOK_DOWN_DELTA       = 6.0    # o pitch de cabeza > habitual + 6 grados
+BLINK_MAX_SECONDS     = 0.5    # cierres mas largos no son parpadeos
+PITCH_HISTORY_FRAMES  = 1800   # ~2 min: postura habitual frente a la pantalla
 EAR_CONSEC_FRAMES     = 2
 SAVE_INTERVAL_SECONDS = 10
 POSTURE_ALERT_PITCH   = 25.0
@@ -222,6 +227,13 @@ class VisualSensorPro:
         self._blink_counter = 0
         self._ear_history   = deque(maxlen=EAR_HISTORY_FRAMES)
         self.blink_threshold = EAR_BLINK_THRESHOLD
+        self._pitch_history = deque(maxlen=PITCH_HISTORY_FRAMES)
+        self._down_history  = deque(maxlen=PITCH_HISTORY_FRAMES)
+        self._blink_s_history = deque(maxlen=PITCH_HISTORY_FRAMES)
+        self._frames_down   = 0
+        self.last_down_pct  = 0.0
+        self._closure_start = 0.0
+        self._long_closures = 0
 
         self.last_avg_ear = 0.0
         self.last_blinks  = 0
@@ -262,16 +274,54 @@ class VisualSensorPro:
         conn.commit()
         conn.close()
 
+    def _clasificar_ojos(self, ear, look_down, blink_s, pitch):
+        """
+        Clasifica el frame como 'cerrado', 'abajo' (mirando el teclado) o 'abierto'.
+        Todo es relativo a los valores habituales del usuario (medianas
+        recientes), porque cada persona y cada camara dan valores distintos.
+
+        Calibracion real (2026-11-12):
+                     EAR   lookDown  blink
+          frente    0.25    0.28     0.23
+          teclado   0.23    0.39-0.65 0.25-0.46
+          cerrados  0.07    0.80     0.68
+        lookDown sube tambien con ojos cerrados, por eso 'cerrado' se
+        decide primero y exige blink alto Y EAR bajo.
+        """
+        self._pitch_history.append(pitch)
+        self._down_history.append(look_down)
+        self._blink_s_history.append(blink_s)
+
+        listo = len(self._ear_history) >= 30
+        ear_base   = float(np.median(self._ear_history)) if listo else 0.25
+        blink_base = float(np.median(self._blink_s_history))
+        down_base  = float(np.median(self._down_history))
+        pitch_base = float(np.median(self._pitch_history))
+        self.blink_threshold = EAR_CLOSED_RATIO * ear_base
+
+        if blink_s > blink_base + BLINK_SCORE_DELTA and ear < self.blink_threshold:
+            return "cerrado"
+        if len(self._down_history) >= 30 and (
+                look_down > down_base + LOOK_DOWN_SCORE_DELTA or
+                pitch - pitch_base > LOOK_DOWN_DELTA):
+            return "abajo"
+        self._ear_history.append(ear)  # solo frames abiertos y de frente
+        return "abierto"
+
     def _save_interval_to_db(self):
-        if not self._ear_values:
+        if not self._ear_values and not self._pitch_values:
             return
-        avg_ear   = float(np.mean(self._ear_values))
+        # Si todo el intervalo fue mirando abajo, el EAR no es valido (NULL)
+        avg_ear   = float(np.mean(self._ear_values)) if self._ear_values else None
         avg_pitch = float(np.mean(self._pitch_values)) if self._pitch_values else 0.0
         avg_yaw   = float(np.mean(self._yaw_values))   if self._yaw_values   else 0.0
         avg_roll  = float(np.mean(self._roll_values))   if self._roll_values  else 0.0
         blinks    = self._blink_count
+        total     = len(self._pitch_values) or 1
+        self.last_down_pct = 100.0 * self._frames_down / total
 
-        self.last_avg_ear = avg_ear
+        if avg_ear is not None:
+            self.last_avg_ear = avg_ear
         self.last_blinks  = blinks
         self.last_pitch   = avg_pitch
         self.last_yaw     = avg_yaw
@@ -288,9 +338,11 @@ class VisualSensorPro:
             )
             conn.commit()
             conn.close()
-            print(f"[Visual Log] {local_time} | {self.source.upper()} | EAR: {avg_ear:.3f} | "
+            ear_txt = f"{avg_ear:.3f}" if avg_ear is not None else "--- "
+            print(f"[Visual Log] {local_time} | {self.source.upper()} | EAR: {ear_txt} | "
                   f"Blinks: {blinks} | Pitch: {avg_pitch:.1f} | "
-                  f"Yaw: {avg_yaw:.1f} | Guardado en DB")
+                  f"Yaw: {avg_yaw:.1f} | Abajo: {self.last_down_pct:.0f}% | "
+                  f"Cierres largos: {self._long_closures} | Guardado en DB")
         except Exception as e:
             print(f"  [ERROR DB] {e}")
 
@@ -304,6 +356,8 @@ class VisualSensorPro:
         self._yaw_values.clear()
         self._roll_values.clear()
         self._blink_count = 0
+        self._frames_down = 0
+        self._long_closures = 0
 
     # ─────────────────────────────────────────────────────────────
     #  MODO DEMO
@@ -386,6 +440,7 @@ class VisualSensorPro:
             min_face_detection_confidence=0.5,
             min_face_presence_confidence=0.5,
             min_tracking_confidence=0.5,
+            output_face_blendshapes=True,   # eyeBlink / eyeLookDown
         )
 
         self.source = "real"
@@ -425,25 +480,40 @@ class VisualSensorPro:
                     left_pts  = np.array([landmarks[i] for i in LEFT_EYE])
                     right_pts = np.array([landmarks[i] for i in RIGHT_EYE])
                     ear = (_compute_ear(left_pts) + _compute_ear(right_pts)) / 2.0
-                    self._ear_values.append(ear)
-
-                    # Umbral adaptativo: cada persona tiene un EAR base distinto
-                    self._ear_history.append(ear)
-                    if len(self._ear_history) >= 30:
-                        self.blink_threshold = EAR_BLINK_RATIO * float(np.median(self._ear_history))
-
-                    if ear < self.blink_threshold:
-                        self._blink_counter += 1
-                    else:
-                        if self._blink_counter >= EAR_CONSEC_FRAMES:
-                            self._blink_count += 1
-                        self._blink_counter = 0
 
                     hpe_points = [landmarks[i] for i in HPE_LANDMARKS]
                     pitch, yaw, roll = _estimate_head_pose(hpe_points, frame.shape)
                     self._pitch_values.append(pitch)
                     self._yaw_values.append(yaw)
                     self._roll_values.append(roll)
+
+                    # Blendshapes de MediaPipe (0-1): mirada abajo y parpado cerrado
+                    bs = {c.category_name: c.score for c in results.face_blendshapes[0]}
+                    look_down = (bs["eyeLookDownLeft"] + bs["eyeLookDownRight"]) / 2
+                    blink_s   = (bs["eyeBlinkLeft"] + bs["eyeBlinkRight"]) / 2
+
+                    estado = self._clasificar_ojos(ear, look_down, blink_s, pitch)
+                    if estado == "abierto":
+                        # El promedio de EAR solo usa ojos abiertos mirando al
+                        # frente: parpadeos y miradas al teclado lo sesgarian.
+                        self._ear_values.append(ear)
+                    elif estado == "abajo":
+                        self._frames_down += 1
+
+                    if estado == "cerrado":
+                        if self._blink_counter == 0:
+                            self._closure_start = time.time()
+                        self._blink_counter += 1
+                    else:
+                        if self._blink_counter >= EAR_CONSEC_FRAMES:
+                            # Un parpadeo dura < 0.5 s; un cierre mas largo es
+                            # mirada profunda al teclado u ojos cerrados.
+                            if time.time() - self._closure_start <= BLINK_MAX_SECONDS:
+                                self._blink_count += 1
+                            else:
+                                self._long_closures += 1
+                        self._blink_counter = 0
+
                     self._draw_overlay(frame, ear, pitch, yaw, roll)
 
                 if time.time() - last_save_time >= SAVE_INTERVAL_SECONDS:

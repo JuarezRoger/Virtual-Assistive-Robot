@@ -68,8 +68,32 @@ class FatiguePredictor:
         self.baseline_ear = None
         self.baseline_apm = None
 
+        # EAR normal del usuario, solo con datos reales de camara
+        # (los registros demo/NULL son simulados y no sirven de referencia)
+        self.personal_ear = None
+        self.compute_personal_ear()
+
         # Intentar cargar modelo existente
         self._load_model()
+
+    def compute_personal_ear(self, days=7, min_rows=30):
+        """Mediana del EAR real (source='real') de los ultimos dias."""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            desde = (datetime.now() - pd.Timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
+            df = pd.read_sql_query(
+                "SELECT avg_ear FROM visual_telemetry "
+                "WHERE source = 'real' AND avg_ear IS NOT NULL AND timestamp >= ?",
+                conn, params=(desde,)
+            )
+            conn.close()
+            if len(df) >= min_rows:
+                self.personal_ear = float(df['avg_ear'].median())
+                print(f"[ML] EAR personal (datos reales): {self.personal_ear:.3f} "
+                      f"({len(df)} registros)")
+        except Exception as e:
+            print(f"[ML] No se pudo calcular EAR personal: {e}")
+        return self.personal_ear
 
     def _load_model(self):
         """Carga un modelo previamente entrenado, si existe."""
@@ -339,7 +363,19 @@ class FatiguePredictor:
         score = 0.0
 
         ear = metrics.get('avg_ear', 0.25)
-        if ear < 0.20:
+        if ear is None or ear != ear:  # NULL/NaN: intervalo sin EAR valido
+            ear = self.personal_ear or 0.25
+        if self.personal_ear:
+            # Relativo al EAR normal del usuario: cada persona abre
+            # los ojos distinto, un umbral fijo da falsos positivos.
+            ratio = ear / self.personal_ear
+            if ratio < 0.80:
+                score += 0.4
+            elif ratio < 0.88:
+                score += 0.25
+            elif ratio < 0.94:
+                score += 0.1
+        elif ear < 0.20:
             score += 0.4
         elif ear < 0.22:
             score += 0.25

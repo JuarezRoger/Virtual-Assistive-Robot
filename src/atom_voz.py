@@ -19,6 +19,7 @@ import ctypes
 import os
 import tempfile
 import threading
+import time
 import uuid
 
 try:
@@ -30,6 +31,29 @@ VOZ = os.environ.get("ATOM_VOZ", "es-MX-JorgeNeural")
 VELOCIDAD = os.environ.get("ATOM_VOZ_VELOCIDAD", "+0%")
 
 _lock = threading.Lock()  # evita que dos avisos hablen encima
+
+# Marca compartida entre procesos: mientras existe, ATOM esta hablando y
+# atom_escucha ignora el microfono (para no activarse con su propia voz).
+MARCA_HABLANDO = os.path.join(tempfile.gettempdir(), "atom_hablando.flag")
+
+
+def atom_esta_hablando(margen=1.0):
+    """True si ATOM habla ahora o termino hace menos de `margen` segundos."""
+    try:
+        edad = time.time() - os.path.getmtime(MARCA_HABLANDO)
+        # Marca "1" de mas de 2 min = proceso que murio hablando: ignorarla
+        return edad < margen or (os.path.getsize(MARCA_HABLANDO) > 0 and edad < 120)
+    except OSError:
+        return False
+
+
+def _marcar(hablando):
+    try:
+        # Contenido "1" = hablando; vacio = termino (el mtime da el margen)
+        with open(MARCA_HABLANDO, "w") as f:
+            f.write("1" if hablando else "")
+    except OSError:
+        pass
 
 
 def _reproducir_mp3(ruta):
@@ -73,20 +97,24 @@ def hablar(texto):
     if not texto:
         return None
     with _lock:
-        # El servicio de edge-tts falla de forma intermitente: 2 intentos
-        for intento in range(2):
-            try:
-                _hablar_edge(texto)
-                return "neural"
-            except Exception as e:
-                error = e
-        print(f"[Voz] edge-tts no disponible ({type(error).__name__}: {error}). Usando voz local.")
+        _marcar(True)
         try:
-            _hablar_local(texto)
-            return "local"
-        except Exception as e:
-            print(f"[Voz] Error de voz local: {e}")
-            return None
+            # El servicio de edge-tts falla de forma intermitente: 2 intentos
+            for intento in range(2):
+                try:
+                    _hablar_edge(texto)
+                    return "neural"
+                except Exception as e:
+                    error = e
+            print(f"[Voz] edge-tts no disponible ({type(error).__name__}: {error}). Usando voz local.")
+            try:
+                _hablar_local(texto)
+                return "local"
+            except Exception as e:
+                print(f"[Voz] Error de voz local: {e}")
+                return None
+        finally:
+            _marcar(False)
 
 
 if __name__ == "__main__":

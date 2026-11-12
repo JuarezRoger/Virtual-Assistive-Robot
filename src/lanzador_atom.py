@@ -16,7 +16,8 @@ sensores = [
     "system_sensor.py",   # <-- Nombre exacto de tu archivo en VS Code
     "visual_sensor.py",
     "live_plot.py",
-    "agent_trigger.py"
+    "agent_trigger.py",
+    "atom_conversacion.py"   # Asistente de voz: "Oye ATOM"
 ]
 
 procesos = {} 
@@ -25,7 +26,7 @@ archivo_log = open(nombre_log, "a", encoding="utf-8")
 
 def iniciar_sensor(sensor):
     # Sin rutas extra, ya que todo está en la misma carpeta 'src'
-    if sensor in ["agent_trigger.py", "live_plot.py"]:
+    if sensor in ["agent_trigger.py", "live_plot.py", "atom_conversacion.py"]:
         return subprocess.Popen([sys.executable, sensor]) 
     else:
         return subprocess.Popen(

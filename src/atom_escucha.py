@@ -24,10 +24,12 @@ import numpy as np
 import sounddevice as sd
 from faster_whisper import WhisperModel
 
+from atom_voz import atom_esta_hablando
+
 SR = 16000
 BLOQUE = 1600                # 100 ms
 SILENCIO_FIN = 0.7           # s de silencio que cierran un fragmento
-MAX_FRAGMENTO = 4.0          # s maximos para buscar la palabra
+MAX_FRAGMENTO = 8.0          # s maximos (cabe "Oye ATOM" + una pregunta)
 FACTOR_RUIDO = 3.0           # voz = RMS > ruido ambiente x este factor
 RMS_MINIMO = 0.006
 MIN_VOZ = 0.3                # s: fragmentos mas cortos son ruido/clics
@@ -59,6 +61,10 @@ class Escucha:
         while True:
             bloque, _ = stream.read(BLOQUE)
             bloque = bloque.flatten()
+            if atom_esta_hablando():
+                # Es la voz de ATOM (este u otro proceso): descartar
+                partes, voz_activa, silencio = [], False, 0.0
+                continue
             rms = float(np.sqrt(np.mean(bloque ** 2)))
             if not voz_activa:
                 if rms > self.umbral:
@@ -101,6 +107,14 @@ class Escucha:
                 if verbose:
                     print(f"  [oído] \"{texto}\"")
                 if PATRON_ACTIVACION.search(texto):
+                    # Re-transcribir con el modelo preciso: la pregunta que
+                    # viene tras "ATOM" importa ("como lo hay" -> "¿cómo voy?")
+                    if self._w_frase is not self._w_act:
+                        preciso = self._transcribir(self._w_frase, audio)
+                        if verbose:
+                            print(f"  [preciso] \"{preciso}\"")
+                        if PATRON_ACTIVACION.search(preciso):
+                            return preciso
                     return texto
         return None
 
