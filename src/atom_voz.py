@@ -27,7 +27,7 @@ try:
 except Exception:
     pass
 
-VOZ = os.environ.get("ATOM_VOZ", "es-MX-JorgeNeural")
+VOZ = os.environ.get("ATOM_VOZ", "es-MX-DaliaNeural")
 VELOCIDAD = os.environ.get("ATOM_VOZ_VELOCIDAD", "+0%")
 
 _lock = threading.Lock()  # evita que dos avisos hablen encima
@@ -120,5 +120,5 @@ def hablar(texto):
 if __name__ == "__main__":
     import sys, time
     t = time.time()
-    modo = hablar(" ".join(sys.argv[1:]) or "Hola. Soy ATOM, tu asistente de monitoreo cognitivo.")
+    modo = hablar(" ".join(sys.argv[1:]) or "Hola. Soy Atómica, tu asistente de monitoreo cognitivo.")
     print(f"Modo: {modo} | {time.time() - t:.1f}s")

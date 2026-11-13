@@ -37,6 +37,12 @@ def iniciar_sensor(sensor):
 
 try:
     print("🤖 Iniciando la arquitectura ATOM (Modo Rápido)...")
+    # Memoria de largo plazo: resumir dias anteriores y borrar crudos viejos
+    try:
+        import atom_memoria
+        atom_memoria.consolidar()
+    except Exception as e:
+        print(f"[Memoria] No se pudo consolidar: {e}")
     archivo_log.write(f"\n--- Inicio de sesión ATOM: {datetime.now().strftime('%H:%M:%S')} ---\n")
     
     for sensor in sensores:

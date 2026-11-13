@@ -1,11 +1,26 @@
+import ctypes
 import time
 import threading
+from ctypes import wintypes
 import psutil
 import pygetwindow as gw
 from pynput import keyboard, mouse
 from datetime import datetime
 import sqlite3
 import os
+
+# Ejecutable -> nombre legible. Lo no listado se guarda como el .exe sin extension.
+NOMBRES_APP = {
+    "chrome.exe": "Google Chrome", "msedge.exe": "Microsoft Edge", "firefox.exe": "Firefox",
+    "code.exe": "Visual Studio Code", "windowsterminal.exe": "Terminal",
+    "powershell.exe": "PowerShell", "pwsh.exe": "PowerShell", "cmd.exe": "Terminal",
+    "explorer.exe": "Explorador de archivos", "python.exe": "Python (ATOM)",
+    "pythonw.exe": "Python (ATOM)", "claude.exe": "Claude", "zoom.exe": "Zoom",
+    "ms-teams.exe": "Teams", "teams.exe": "Teams", "blender.exe": "Blender",
+    "winword.exe": "Word", "excel.exe": "Excel", "powerpnt.exe": "PowerPoint",
+    "notepad.exe": "Bloc de notas", "spotify.exe": "Spotify", "discord.exe": "Discord",
+    "whatsapp.exe": "WhatsApp", "acrobat.exe": "Acrobat", "acrord32.exe": "Acrobat",
+}
 
 class SystemSensor:
     def __init__(self, log_interval=10, db_path="../data/atom_telemetry.db"):
@@ -39,6 +54,9 @@ class SystemSensor:
                 ram_usage REAL
             )
         ''')
+        # Columna `app`: nombre del programa (lo unico que se resume o se envia a la IA)
+        if "app" not in {r[1] for r in cursor.execute("PRAGMA table_info(system_telemetry)")}:
+            cursor.execute("ALTER TABLE system_telemetry ADD COLUMN app TEXT")
         conn.commit()
         conn.close()
         print(f"Base de datos lista en: {self.db_path}")
@@ -57,6 +75,17 @@ class SystemSensor:
         except Exception:
             return "Error capturando ventana"
 
+    def _get_active_app(self):
+        """Nombre del programa en primer plano, a partir de su proceso."""
+        try:
+            hwnd = ctypes.windll.user32.GetForegroundWindow()
+            pid = wintypes.DWORD()
+            ctypes.windll.user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+            exe = psutil.Process(pid.value).name()
+            return NOMBRES_APP.get(exe.lower(), exe.rsplit(".", 1)[0])
+        except Exception:
+            return None
+
     def _log_metrics(self):
         # Es vital abrir la conexión dentro del hilo que hará las inserciones
         conn = sqlite3.connect(self.db_path)
@@ -73,9 +102,10 @@ class SystemSensor:
             # Insertar el registro en la base de datos
             cursor.execute('''
                 INSERT INTO system_telemetry 
-                (timestamp, active_window, keystrokes, mouse_clicks, cpu_usage, ram_usage)
-                VALUES (?, ?, ?, ?, ?, ?)
-            ''', (timestamp, self.current_window, self.keystrokes, self.mouse_clicks, cpu_usage, ram_usage))
+                (timestamp, active_window, app, keystrokes, mouse_clicks, cpu_usage, ram_usage)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            ''', (timestamp, self.current_window, self._get_active_app(), self.keystrokes,
+                  self.mouse_clicks, cpu_usage, ram_usage))
             
             conn.commit() # Confirmar los cambios
             

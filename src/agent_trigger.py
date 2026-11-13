@@ -45,6 +45,13 @@ except ImportError:
     def _notificar(titulo, mensaje):
         pass
 
+# Memoria episodica: cada alerta queda registrada como evento relevante
+try:
+    from atom_memoria import registrar_evento as _evento
+except ImportError:
+    def _evento(tipo, detalle=""):
+        pass
+
 # Importar el predictor de fatiga
 try:
     from fatigue_model import FatiguePredictor
@@ -146,7 +153,8 @@ class SmartTriggerEngine:
 
         window_name = "Desconocida"
         if not df_sys['active_window'].empty:
-            window_name = str(df_sys['active_window'].value_counts().idxmax())
+            from atom_memoria import nombre_app  # solo el programa: el titulo no sale del equipo
+            window_name = nombre_app(str(df_sys['active_window'].value_counts().idxmax())) or "Desconocida"
 
         # Predecir con ML o heurística
         if self.predictor:
@@ -221,11 +229,13 @@ class SmartTriggerEngine:
         print("=" * 55)
 
         self._last_fatigue_alert = time.time()
+        _evento("alerta_fatiga", f"prob {context['probability']:.0%}, EAR {context['ear']:.2f}, "
+                                 f"en {str(context['window_name'])[:40]}")
 
         # Generar mensaje con GPT si hay API key
         if self.api_key:
             prompt = (
-                f"Eres ATOM, un asistente IA servicial de monitoreo cognitivo. "
+                f"Eres Atómica, la asistente IA servicial de monitoreo cognitivo. "
                 f"Detectaste fatiga (probabilidad: {context['probability']:.0%}) "
                 f"mientras el usuario trabaja en: '{context['window_name']}'. "
                 f"Su EAR es {context['ear']:.2f} (normal ~0.27). "
@@ -234,12 +244,12 @@ class SmartTriggerEngine:
             texto = self._call_gpt(prompt)
         else:
             texto = (
-                f"ATOM detecta fatiga cognitiva ({context['probability']:.0%}). "
+                f"Atómica detecta fatiga cognitiva ({context['probability']:.0%}). "
                 f"Te recomiendo una pausa de 5 minutos. "
                 f"Tu concentración te lo agradecerá."
             )
 
-        print(f"\n🤖 ATOM: \"{texto}\"")
+        print(f"\n🤖 Atómica: \"{texto}\"")
         _notificar("🧠 ATOM - Fatiga Cognitiva", texto)
         _hablar(texto)
 
@@ -251,10 +261,11 @@ class SmartTriggerEngine:
         print("=" * 55)
 
         self._last_posture_alert = time.time()
+        _evento("alerta_postura", posture_info['issue'])
 
         if self.api_key:
             prompt = (
-                f"Eres ATOM, un asistente IA de ergonomía. "
+                f"Eres Atómica, la asistente IA de ergonomía. "
                 f"Detectaste mala postura: {posture_info['issue']}. "
                 f"Pitch: {posture_info['pitch']:.1f}°, Yaw: {posture_info['yaw']:.1f}°. "
                 f"Pide al usuario que corrija su posición de forma amable. "
@@ -263,11 +274,11 @@ class SmartTriggerEngine:
             texto = self._call_gpt(prompt)
         else:
             texto = (
-                f"ATOM detecta {posture_info['issue']}. "
+                f"Atómica detecta {posture_info['issue']}. "
                 f"Por favor, ajusta tu silla y pantalla para evitar dolor cervical."
             )
 
-        print(f"\n🤖 ATOM: \"{texto}\"")
+        print(f"\n🤖 Atómica: \"{texto}\"")
         _notificar("🦴 ATOM - Postura Cervical", texto)
         _hablar(texto)
 
@@ -289,7 +300,7 @@ class SmartTriggerEngine:
             return response.json()['choices'][0]['message']['content'].strip()
         except Exception as e:
             print(f"[GPT] Error: {e}")
-            return "ATOM recomienda una pausa breve para recuperar tu concentración."
+            return "Te recomiendo una pausa breve para recuperar tu concentración."
 
     def run_monitor(self):
         """Bucle principal del motor de intervención."""

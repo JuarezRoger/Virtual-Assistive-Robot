@@ -51,3 +51,9 @@ data/*.db-journal
 
 # Modelo MediaPipe (se descarga automaticamente)
 models/*.task
+
+# Respaldos locales de la base de datos
+data/respaldos/
+
+# Grabaciones de voz del usuario (banco de pruebas)
+data/pruebas_voz/
